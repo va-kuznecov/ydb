@@ -94,8 +94,6 @@ TPDisk::TPDisk(std::shared_ptr<TPDiskCtx> pCtx, const TIntrusivePtr<TPDiskConfig
     FastOperationsQueue.reserve(16 << 10);
 
     JointLogReads.reserve(16 << 10);
-    JointChunkReads.reserve(16 << 10);
-    JointChunkWrites.reserve(16 << 10);
     JointLogWrites.reserve(16 << 10);
     JointCommits.reserve(16 << 10);
     JointChunkForgets.reserve(16 << 10);
@@ -322,11 +320,12 @@ void TPDisk::Stop() {
         delete req;
     }
     JointLogReads.clear();
-    for (auto& req : JointChunkReads) {
-        TRequestBase::AbortDelete(req.Get(), PCtx->ActorSystem);
+    while (JointChunkReads.size()) {
+        TRequestBase::AbortDelete(JointChunkReads.front().Get(), PCtx->ActorSystem);
+        JointChunkReads.pop();
     }
-    JointChunkReads.clear();
-    for (TRequestBase* req : JointChunkWrites) {
+    while (JointChunkWrites.size()) {
+        TRequestBase* req = JointChunkWrites.front();
         switch (req->GetType()) {
             case ERequestType::RequestChunkWrite:
             {
@@ -342,8 +341,8 @@ void TPDisk::Stop() {
             default:
                 Y_FAIL_S("Unexpected request type# " << ui64(req->GetType()) << " in JointChunkWrites");
         }
+        JointChunkWrites.pop();
     }
-    JointChunkWrites.clear();
     for (TLogWrite* req : JointLogWrites) {
         delete req;
     }
@@ -2217,9 +2216,14 @@ void TPDisk::Slay(TSlay &evSlay) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void TPDisk::ProcessChunkWriteQueue() {
-    NHPTimer::STime now = HPNow();
-    for (auto it = JointChunkWrites.begin(); it != JointChunkWrites.end(); ++it) {
-        TRequestBase *req = (*it);
+    auto start = TMonotonic::Now();
+
+    size_t initialSize = JointChunkWrites.size();
+    size_t processed = 0;
+    while (JointChunkWrites.size()) {
+        TRequestBase *req = JointChunkWrites.front();
+        JointChunkWrites.pop();
+
         req->SpanStack.PopOk();
         req->SpanStack.Push(TWilson::PDiskDetailed, "PDisk.InBlockDevice", NWilson::EFlags::AUTO_END);
 
@@ -2236,20 +2240,30 @@ void TPDisk::ProcessChunkWriteQueue() {
             Mon.IncrementQueueTime(piece->ChunkWrite->PriorityClass, piece->ChunkWrite->LifeDurationMs(now));
         }
         delete piece;
+
+        ++processed;
+        // prevent this thread from being stuck for long
+        if (processed > 8 && (TMonotonic::Now() - start).MicroSeconds() > 500) {
+            break;
+        }
     }
-    LWTRACK(PDiskProcessChunkWriteQueue, UpdateCycleOrbit, PCtx->PDiskId, JointChunkWrites.size());
-    JointChunkWrites.clear();
+    LWTRACK(PDiskProcessChunkWriteQueue, UpdateCycleOrbit, PCtx->PDiskId, initialSize, processed);
 }
 
 void TPDisk::ProcessChunkReadQueue() {
-    NHPTimer::STime now = HPNow();
+    auto start = TMonotonic::Now();
     // Size (bytes) of elementary sectors block, it is useless to read/write less than that blockSize
     ui64 bufferSize;
     with_lock(StateMutex) {
         bufferSize = BufferPool->GetBufferSize() / Format.SectorSize * Format.SectorSize;
     }
 
-    for (auto& req : JointChunkReads) {
+    size_t initialSize = JointChunkReads.size();
+    size_t processed = 0;
+    while (JointChunkReads.size()) {
+        auto req = JointChunkReads.front();
+        JointChunkReads.pop();
+
         req->SpanStack.PopOk();
         req->SpanStack.Push(TWilson::PDiskDetailed, "PDisk.InBlockDevice", NWilson::EFlags::AUTO_END);
 
@@ -2280,12 +2294,16 @@ void TPDisk::ProcessChunkReadQueue() {
             // WARNING: Don't access "read" after this point.
             // Don't add code before the warning!
             //
-            Mon.IncrementQueueTime(priorityClass, HPMilliSeconds(now - creationTime));
+            Mon.IncrementQueueTime(priorityClass, HPMilliSeconds(HPNow() - creationTime));
             P_LOG(PRI_DEBUG, BPD37, "enqueued all TChunkReadPiece", (ReqId, reqId), (chunkIdx, chunkIdx));
         }
+
+        ++processed;
+        if (processed > 16 && (TMonotonic::Now() - start).MicroSeconds() > 500) {
+            break;
+        }
     }
-    LWTRACK(PDiskProcessChunkReadQueue, UpdateCycleOrbit, PCtx->PDiskId, JointChunkReads.size());
-    JointChunkReads.clear();
+    LWTRACK(PDiskProcessChunkReadQueue, UpdateCycleOrbit, PCtx->PDiskId, initialSize, processed);
 }
 
 void TPDisk::TrimAllUntrimmedChunks() {
@@ -3245,7 +3263,7 @@ void TPDisk::RouteRequest(TRequestBase *request) {
             if (auto span = request->SpanStack.PeekTop()) {
                 span->Event("move_to_batcher", {});
             }
-            JointChunkReads.emplace_back(piece->SelfPointer.Get());
+            JointChunkReads.emplace(piece->SelfPointer.Get());
             piece->SelfPointer.Reset();
             // FIXME(cthulhu): Unreserve() for TChunkReadPiece is called while processing to avoid requeueing issues
             break;
@@ -3254,7 +3272,7 @@ void TPDisk::RouteRequest(TRequestBase *request) {
             if (auto span = request->SpanStack.PeekTop()) {
                 span->Event("move_to_batcher", {});
             }
-            JointChunkWrites.push_back(request);
+            JointChunkWrites.push(request);
             break;
         case ERequestType::RequestChunkTrim:
         {
@@ -3331,7 +3349,11 @@ void TPDisk::ProcessPausedQueue() {
             TRequestBase *ev = PausedQueue.front();
             PausedQueue.pop_front();
             if (PreprocessRequest(ev)) {
-                PushRequestToForseti(ev);
+                if (Cfg->UseNoopScheduler) {
+                    RouteRequest(ev);
+                } else {
+                    PushRequestToForseti(ev);
+                }
             }
         }
     }
@@ -3412,8 +3434,12 @@ void TPDisk::EnqueueAll() {
             }
         } else {
             if (PreprocessRequest(request)) {
-                PushRequestToForseti(request);
-                ++pushedToForsetiReqs;
+                if (Cfg->UseNoopScheduler) {
+                    RouteRequest(request);
+                } else {
+                    PushRequestToForseti(request);
+                }
+                ++pushedToForsetiReqs; // ???
             }
         }
         ++processedReqs;
@@ -3589,9 +3615,9 @@ void TPDisk::Update() {
     if (tact == ETact::TactLc) {
         ProcessLogWriteQueueAndCommits();
     }
-    ProcessChunkWriteQueue();
     ProcessFastOperationsQueue();
     ProcessChunkReadQueue();
+    ProcessChunkWriteQueue();
     ProcessLogReadQueue();
     ProcessChunkTrimQueue();
     if (tact != ETact::TactLc) {

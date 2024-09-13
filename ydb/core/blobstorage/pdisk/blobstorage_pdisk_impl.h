@@ -33,6 +33,8 @@
 #include <util/system/condvar.h>
 #include <util/system/mutex.h>
 
+#include <queue>
+
 namespace NKikimr {
 namespace NPDisk {
 
@@ -74,8 +76,8 @@ public:
     TAtomic InputQueueCost = 0;
 
     TVector<TRequestBase*> JointLogReads;
-    TVector<TIntrusivePtr<TRequestBase>> JointChunkReads;
-    TVector<TRequestBase*> JointChunkWrites;
+    std::queue<TIntrusivePtr<TRequestBase>> JointChunkReads;
+    std::queue<TRequestBase*> JointChunkWrites;
     TVector<TLogWrite*> JointLogWrites;
     TVector<TLogWrite*> JointCommits;
     TVector<TChunkTrim*> JointChunkTrims;
