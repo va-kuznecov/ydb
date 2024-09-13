@@ -160,6 +160,8 @@ struct TPDiskConfig : public TThrRefBase {
 
     bool MetadataOnly = false;
 
+    bool UseNoopScheduler = false;
+
     TPDiskConfig(ui64 pDiskGuid, ui32 pdiskId, ui64 pDiskCategory)
         : TPDiskConfig({}, pDiskGuid, pdiskId, pDiskCategory)
     {}
@@ -220,6 +222,8 @@ struct TPDiskConfig : public TThrRefBase {
         UseSpdkNvmeDriver = Path.StartsWith("PCIe:");
         Y_ABORT_UNLESS(!UseSpdkNvmeDriver || deviceType == NPDisk::DEVICE_TYPE_NVME,
                 "SPDK NVMe driver can be used only with NVMe devices!");
+
+        UseNoopScheduler = choose(1, 0, 0);
     }
 
     TString GetDevicePath() {
