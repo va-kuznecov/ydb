@@ -314,9 +314,10 @@ struct TPDiskConfig : public TThrRefBase {
         str << " OrangeLogChunksMultiplier# " << OrangeLogChunksMultiplier << x;
         str << " WarningLogChunksMultiplier# " << WarningLogChunksMultiplier << x;
         str << " YellowLogChunksMultiplier# " << YellowLogChunksMultiplier << x;
-        str << " MaxMetadataMegabytes# " << MaxMetadataMegabytes << x;
         str << " SpaceColorBorder# " << SpaceColorBorder << x;
         str << " CompletionThreadsCount# " << CompletionThreadsCount << x;
+        str << " MaxMetadataMegabytes# " << MaxMetadataMegabytes << x;
+        str << " UseNoopScheduler# " << UseNoopScheduler << x;
         str << "}";
         return str.Str();
     }
