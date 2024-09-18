@@ -78,7 +78,9 @@ public:
     TVector<TRequestBase*> JointLogReads;
     std::queue<TIntrusivePtr<TRequestBase>> JointChunkReads;
     std::queue<TRequestBase*> JointChunkWrites;
+    std::queue<TRequestBase*> PostponedLogWrites;
     TVector<TLogWrite*> JointLogWrites;
+    size_t JointLogWritesBytesSize = 0;
     TVector<TLogWrite*> JointCommits;
     TVector<TChunkTrim*> JointChunkTrims;
     TVector<std::unique_ptr<TChunkForget>> JointChunkForgets;

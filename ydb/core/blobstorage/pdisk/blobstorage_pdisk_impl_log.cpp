@@ -708,6 +708,18 @@ void TPDisk::WriteSysLogRestorePoint(TCompletionAction *action, TReqId reqId, NW
 // Common log writing
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void TPDisk::ProcessLogWriteQueueAndCommits() {
+    JointLogWritesBytesSize = 0;
+    while (PostponedLogWrites.size() && JointLogWrites.size() < 50 && JointLogWritesBytesSize < (size_t)ForsetiOpPieceSizeCached) {
+        auto *log = static_cast<TLogWrite*>(PostponedLogWrites.front());
+        PostponedLogWrites.pop();
+
+        JointLogWrites.push_back(log);
+        JointLogWritesBytesSize += log->Data.Size();
+        if (log->Signature.HasCommitRecord()) {
+            JointCommits.push_back(log);
+        }
+    }
+
     if (JointLogWrites.empty()) {
         LWTRACK(PDiskProcessLogWriteQueue, UpdateCycleOrbit, PCtx->PDiskId, JointLogWrites.size(), JointCommits.size());
         return;

@@ -156,6 +156,9 @@ struct TEventTypeField {
     PROBE(PDiskAddToScheduler, GROUPS("PDisk", "PDiskRequest"), \
       TYPES(TPDiskIdField, ui64, double, ui64, bool, ui64), \
       NAMES("pdisk", "reqId", "creationTimeSec", "owner", "isFast", "priorityClass")) \
+    PROBE(PDiskAddToNoopScheduler, GROUPS("PDisk", "PDiskRequest"), \
+      TYPES(TPDiskIdField, ui64, double, ui64, bool, ui64), \
+      NAMES("pdisk", "reqId", "creationTimeSec", "owner", "isFast", "priorityClass")) \
     PROBE(PDiskRouteRequest, GROUPS("PDisk", "PDiskRequest"), \
       TYPES(TPDiskIdField, ui64, double, ui64, bool, ui64), \
       NAMES("pdisk", "reqId", "creationTimeSec", "owner", "isFast", "priorityClass")) \

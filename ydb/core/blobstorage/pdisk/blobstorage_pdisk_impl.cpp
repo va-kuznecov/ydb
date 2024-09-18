@@ -327,6 +327,8 @@ void TPDisk::Stop() {
     }
     while (JointChunkWrites.size()) {
         TRequestBase* req = JointChunkWrites.front();
+        JointChunkWrites.pop();
+
         switch (req->GetType()) {
             case ERequestType::RequestChunkWrite:
             {
@@ -342,10 +344,13 @@ void TPDisk::Stop() {
             default:
                 Y_FAIL_S("Unexpected request type# " << ui64(req->GetType()) << " in JointChunkWrites");
         }
-        JointChunkWrites.pop();
     }
     for (TLogWrite* req : JointLogWrites) {
         delete req;
+    }
+    while (PostponedLogWrites.size()) {
+        delete PostponedLogWrites.front();
+        PostponedLogWrites.pop();
     }
     JointLogWrites.clear();
     JointCommits.clear();
@@ -2508,7 +2513,7 @@ void TPDisk::ProcessFastOperationsQueue() {
                 static_cast<TContinueReadMetadata&>(*req).Execute(PCtx->ActorSystem);
                 break;
             default:
-                Y_FAIL_S("Unexpected request type# " << (ui64)req->GetType());
+                Y_FAIL_S("Unexpected request type# " << TypeName(*req));
                 break;
         }
     }
@@ -3115,126 +3120,115 @@ bool TPDisk::PreprocessRequest(TRequestBase *request) {
 }
 
 void TPDisk::PushRequestToForseti(TRequestBase *request) {
-    if (request->GateId != GateFastOperation) {
-        bool isAdded = false;
-
-        NSchLab::TCbs *cbs = ForsetiScheduler.GetCbs(request->Owner, request->GateId);
-        if (!cbs) {
-            P_LOG(PRI_ERROR, BPD44, "PushRequestToForseti Can't push to Forseti! Trying system log gate",
-                        (ReqId, request->ReqId),
-                        (Cost, request->Cost),
-                        (JobKind, (ui64)request->JobKind),
-                        (ownerId, request->Owner),
-                        (GateId, (ui64)request->GateId));
-            Mon.ForsetiCbsNotFound->Inc();
-            ui8 originalGateId = request->GateId;
-            request->GateId = GateLog;
-            cbs = ForsetiScheduler.GetCbs(OwnerSystem, request->GateId);
-            if (!cbs) {
-                TStringStream str;
-                str << "PDiskId# " << PCtx->PDiskId
-                    << " ReqId# " <<  request->ReqId
-                    << " Cost# " << request->Cost
-                    << " JobKind# " << (ui64)request->JobKind
-                    << " ownerId# " << request->Owner
-                    << " GateId# " << (ui64)request->GateId
-                    << " originalGateId# " << (ui64)originalGateId
-                    << " PushRequestToForseti Can't push to Forseti! Request may get lost."
-                    << " Marker# BPD45";
-                Y_FAIL_S(str.Str());
-            }
-        }
-
-        if (request->GetType() == ERequestType::RequestLogWrite) {
-            TIntrusivePtr<NSchLab::TJob> job = cbs->PeekTailJob();
-            if (job && job->Cost < ForsetiMaxLogBatchNsCached
-                    && static_cast<TRequestBase *>(job->Payload)->GetType() == ERequestType::RequestLogWrite) {
-                TLogWrite &batch = *static_cast<TLogWrite*>(job->Payload);
-
-                if (auto span = request->SpanStack.Push(TWilson::PDiskDetailed, "PDisk.InScheduler.InLogWriteBatch")) {
-                    span->Attribute("Batch.ReqId", static_cast<i64>(batch.ReqId.Id));
-                }
-                batch.AddToBatch(static_cast<TLogWrite*>(request));
-                ui64 prevCost = job->Cost;
-                job->Cost += request->Cost;
-
-                ForsetiTimeNs++;
-                ForsetiScheduler.OnJobCostChange(cbs, job, ForsetiTimeNs, prevCost);
-
-                LOG_DEBUG(*PCtx->ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32 " ReqId# %" PRIu64
-                        " PushRequestToForseti AddToBatch in Forseti.",
-                        PCtx->PDiskId, (ui64)request->ReqId.Id);
-
-                isAdded = true;
-            }
-        }
-        if (!isAdded) {
-            if (request->GetType() == ERequestType::RequestChunkWrite) {
-                TIntrusivePtr<TChunkWrite> whole(static_cast<TChunkWrite*>(request));
-
-                const ui32 jobSizeLimit  = ui64(ForsetiOpPieceSizeCached) * Format.SectorPayloadSize() / Format.SectorSize;
-                const ui32 jobCount = (whole->TotalSize + jobSizeLimit - 1) / jobSizeLimit;
-
-                ui32 remainingSize = whole->TotalSize;
-                for (ui32 idx = 0; idx < jobCount; ++idx) {
-                    auto span = request->SpanStack.CreateChild(TWilson::PDiskBasic, "PDisk.ChunkWritePiece", NWilson::EFlags::AUTO_END);
-                    span.Attribute("small_job_idx", idx)
-                        .Attribute("is_last_piece", idx == jobCount - 1);
-                    ui32 jobSize = Min(remainingSize, jobSizeLimit);
-                    TChunkWritePiece *piece = new TChunkWritePiece(whole, idx * jobSizeLimit, jobSize, std::move(span));
-                    piece->EstimateCost(DriveModel);
-                    AddJobToForseti(cbs, piece, request->JobKind);
-                    remainingSize -= jobSize;
-                }
-                Y_VERIFY_S(remainingSize == 0, remainingSize);
-            } else if (request->GetType() == ERequestType::RequestChunkRead) {
-                TIntrusivePtr<TChunkRead> read = std::move(static_cast<TChunkRead*>(request)->SelfPointer);
-                ui32 totalSectors = read->LastSector - read->FirstSector + 1;
-
-                Y_DEBUG_ABORT_UNLESS(ForsetiOpPieceSizeCached % Format.SectorSize == 0);
-                const ui32 jobSizeLimit = ForsetiOpPieceSizeCached / Format.SectorSize;
-                const ui32 jobCount = (totalSectors + jobSizeLimit - 1) / jobSizeLimit;
-                for (ui32 idx = 0; idx < jobCount; ++idx) {
-                    auto span = request->SpanStack.CreateChild(TWilson::PDiskBasic, "PDisk.ChunkReadPiece", NWilson::EFlags::AUTO_END);
-                    bool isLast = idx == jobCount - 1;
-                    span.Attribute("small_job_idx", idx)
-                        .Attribute("is_last_piece", isLast);
-
-                    ui32 jobSize = Min(totalSectors, jobSizeLimit);
-                    auto piece = new TChunkReadPiece(read, idx * jobSizeLimit, jobSize * Format.SectorSize, isLast, std::move(span));
-                    read->Orbit.Fork(piece->Orbit);
-                    LWTRACK(PDiskChunkReadPieceAddToScheduler, piece->Orbit, PCtx->PDiskId, idx, idx * jobSizeLimit * Format.SectorSize,
-                            jobSizeLimit * Format.SectorSize);
-                    piece->EstimateCost(DriveModel);
-                    piece->SelfPointer = piece;
-                    AddJobToForseti(cbs, piece, request->JobKind);
-                    totalSectors -= jobSize;
-                }
-                Y_VERIFY_S(totalSectors == 0, totalSectors);
-            } else {
-                AddJobToForseti(cbs, request, request->JobKind);
-            }
-        }
-    } else {
+    if (request->GateId == GateFastOperation) {
         FastOperationsQueue.push_back(std::unique_ptr<TRequestBase>(request));
         LOG_DEBUG(*PCtx->ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32 " ReqId# %" PRIu64
                 " PushRequestToForseti Push to FastOperationsQueue.size# %" PRIu64,
                 (ui32)PCtx->PDiskId, (ui64)request->ReqId.Id, (ui64)FastOperationsQueue.size());
+        return;
+    }
+
+    NSchLab::TCbs *cbs = ForsetiScheduler.GetCbs(request->Owner, request->GateId);
+    if (!cbs) {
+        P_LOG(PRI_ERROR, BPD44, "PushRequestToForseti Can't push to Forseti! Trying system log gate",
+                    (ReqId, request->ReqId),
+                    (Cost, request->Cost),
+                    (JobKind, (ui64)request->JobKind),
+                    (ownerId, request->Owner),
+                    (GateId, (ui64)request->GateId));
+        Mon.ForsetiCbsNotFound->Inc();
+        ui8 originalGateId = request->GateId;
+        request->GateId = GateLog;
+        cbs = ForsetiScheduler.GetCbs(OwnerSystem, request->GateId);
+    }
+
+    if (request->GetType() == ERequestType::RequestLogWrite) {
+        TIntrusivePtr<NSchLab::TJob> job = cbs->PeekTailJob();
+        if (job && job->Cost < ForsetiMaxLogBatchNsCached
+                && static_cast<TRequestBase *>(job->Payload)->GetType() == ERequestType::RequestLogWrite) {
+            TLogWrite &batch = *static_cast<TLogWrite*>(job->Payload);
+
+            if (auto span = request->SpanStack.Push(TWilson::PDiskDetailed, "PDisk.InScheduler.InLogWriteBatch")) {
+                span->Attribute("Batch.ReqId", static_cast<i64>(batch.ReqId.Id));
+            }
+            batch.AddToBatch(static_cast<TLogWrite*>(request));
+            ui64 prevCost = job->Cost;
+            job->Cost += request->Cost;
+
+            ForsetiTimeNs++;
+            ForsetiScheduler.OnJobCostChange(cbs, job, ForsetiTimeNs, prevCost);
+
+            LOG_DEBUG(*PCtx->ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32 " ReqId# %" PRIu64
+                    " PushRequestToForseti AddToBatch in Forseti.",
+                    PCtx->PDiskId, (ui64)request->ReqId.Id);
+        } else {
+            AddJobToForseti(cbs, request, request->JobKind);
+        }
+    } else if (request->GetType() == ERequestType::RequestChunkWrite) {
+        TIntrusivePtr<TChunkWrite> whole(static_cast<TChunkWrite*>(request));
+
+        const ui32 jobSizeLimit  = ui64(ForsetiOpPieceSizeCached) * Format.SectorPayloadSize() / Format.SectorSize;
+        const ui32 jobCount = (whole->TotalSize + jobSizeLimit - 1) / jobSizeLimit;
+
+        ui32 remainingSize = whole->TotalSize;
+        for (ui32 idx = 0; idx < jobCount; ++idx) {
+            auto span = request->SpanStack.CreateChild(TWilson::PDiskBasic, "PDisk.ChunkWritePiece", NWilson::EFlags::AUTO_END);
+            span.Attribute("small_job_idx", idx)
+                .Attribute("is_last_piece", idx == jobCount - 1);
+            ui32 jobSize = Min(remainingSize, jobSizeLimit);
+            TChunkWritePiece *piece = new TChunkWritePiece(whole, idx * jobSizeLimit, jobSize, std::move(span));
+            piece->EstimateCost(DriveModel);
+            AddJobToForseti(cbs, piece, request->JobKind);
+            remainingSize -= jobSize;
+        }
+        Y_VERIFY_S(remainingSize == 0, remainingSize);
+    } else if (request->GetType() == ERequestType::RequestChunkRead) {
+        TIntrusivePtr<TChunkRead> read = std::move(static_cast<TChunkRead*>(request)->SelfPointer);
+        ui32 totalSectors = read->LastSector - read->FirstSector + 1;
+
+        Y_DEBUG_ABORT_UNLESS(ForsetiOpPieceSizeCached % Format.SectorSize == 0);
+        const ui32 jobSizeLimit = ForsetiOpPieceSizeCached / Format.SectorSize;
+        const ui32 jobCount = (totalSectors + jobSizeLimit - 1) / jobSizeLimit;
+        for (ui32 idx = 0; idx < jobCount; ++idx) {
+            auto span = request->SpanStack.CreateChild(TWilson::PDiskBasic, "PDisk.ChunkReadPiece", NWilson::EFlags::AUTO_END);
+            bool isLast = idx == jobCount - 1;
+            span.Attribute("small_job_idx", idx)
+                .Attribute("is_last_piece", isLast);
+
+            ui32 jobSize = Min(totalSectors, jobSizeLimit);
+            auto piece = new TChunkReadPiece(read, idx * jobSizeLimit, jobSize * Format.SectorSize, isLast, std::move(span));
+            read->Orbit.Fork(piece->Orbit);
+            LWTRACK(PDiskChunkReadPieceAddToScheduler, piece->Orbit, PCtx->PDiskId, idx, idx * jobSizeLimit * Format.SectorSize,
+                    jobSizeLimit * Format.SectorSize);
+            piece->EstimateCost(DriveModel);
+            piece->SelfPointer = piece;
+            AddJobToForseti(cbs, piece, request->JobKind);
+            totalSectors -= jobSize;
+        }
+        Y_VERIFY_S(totalSectors == 0, totalSectors);
+    } else {
+        AddJobToForseti(cbs, request, request->JobKind);
     }
 }
 
 void TPDisk::AddJobToForseti(NSchLab::TCbs *cbs, TRequestBase *request, NSchLab::EJobKind jobKind) {
-    LWTRACK(PDiskAddToScheduler, request->Orbit, PCtx->PDiskId, request->ReqId.Id, HPSecondsFloat(request->CreationTime),
-            request->Owner, request->IsFast, request->PriorityClass);
-    request->SpanStack.Push(TWilson::PDiskDetailed, "PDisk.InScheduler");
-    TIntrusivePtr<NSchLab::TJob> job = ForsetiScheduler.CreateJob();
-    job->Payload = request;
-    job->Cost = request->Cost;
-    job->JobKind = jobKind;
-    ForsetiTimeNs++;
-    ForsetiScheduler.AddJob(cbs, job, request->Owner, request->GateId, ForsetiTimeNs);
-    LOG_DEBUG(*PCtx->ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32 " ReqId# %" PRIu64
-            " AddJobToForseti", (ui32)PCtx->PDiskId, (ui64)request->ReqId.Id);
+    if (UseNoopSchedulerCached) {
+        RouteRequest(request);
+        LWTRACK(PDiskAddToNoopScheduler, request->Orbit, PCtx->PDiskId, request->ReqId.Id, HPSecondsFloat(request->CreationTime),
+                request->Owner, request->IsFast, request->PriorityClass);
+    } else {
+        LWTRACK(PDiskAddToScheduler, request->Orbit, PCtx->PDiskId, request->ReqId.Id, HPSecondsFloat(request->CreationTime),
+                request->Owner, request->IsFast, request->PriorityClass);
+        request->SpanStack.Push(TWilson::PDiskDetailed, "PDisk.InScheduler");
+        TIntrusivePtr<NSchLab::TJob> job = ForsetiScheduler.CreateJob();
+        job->Payload = request;
+        job->Cost = request->Cost;
+        job->JobKind = jobKind;
+        ForsetiTimeNs++;
+        ForsetiScheduler.AddJob(cbs, job, request->Owner, request->GateId, ForsetiTimeNs);
+        LOG_DEBUG(*PCtx->ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32 " ReqId# %" PRIu64
+                " AddJobToForseti", (ui32)PCtx->PDiskId, (ui64)request->ReqId.Id);
+    }
 }
 
 void TPDisk::RouteRequest(TRequestBase *request) {
@@ -3295,10 +3289,7 @@ void TPDisk::RouteRequest(TRequestBase *request) {
                         .Event("move_to_batcher", {})
                         .Attribute("HasCommitRecord", log->Signature.HasCommitRecord());
                 }
-                JointLogWrites.push_back(log);
-                if (log->Signature.HasCommitRecord()) {
-                    JointCommits.push_back(log);
-                }
+                PostponedLogWrites.push(log);
                 log = batch;
             }
             break;
@@ -3306,6 +3297,7 @@ void TPDisk::RouteRequest(TRequestBase *request) {
         case ERequestType::RequestChunkForget:
         {
             if (auto span = request->SpanStack.PeekTop()) {
+
                 span->Event("move_to_batcher", {});
             }
             TChunkForget *forget = static_cast<TChunkForget*>(request);
@@ -3353,11 +3345,7 @@ void TPDisk::ProcessPausedQueue() {
             TRequestBase *ev = PausedQueue.front();
             PausedQueue.pop_front();
             if (PreprocessRequest(ev)) {
-                if (UseNoopSchedulerCached) {
-                    RouteRequest(ev);
-                } else {
-                    PushRequestToForseti(ev);
-                }
+                PushRequestToForseti(ev);
             }
         }
     }
@@ -3438,11 +3426,7 @@ void TPDisk::EnqueueAll() {
             }
         } else {
             if (PreprocessRequest(request)) {
-                if (UseNoopSchedulerCached) {
-                    RouteRequest(request);
-                } else {
-                    PushRequestToForseti(request);
-                }
+                PushRequestToForseti(request);
                 ++pushedToForsetiReqs; // ???
             }
         }
@@ -3461,6 +3445,8 @@ void TPDisk::Update() {
     LWTRACK(PDiskUpdateStarted, UpdateCycleOrbit, PCtx->PDiskId);
 
     ForsetiMaxLogBatchNsCached = ForsetiMaxLogBatchNs;
+    //UseNoopSchedulerCached = UseNoopScheduler;
+    UseNoopSchedulerCached = true;
     ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ? ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;
     ForsetiOpPieceSizeCached = Min<i64>(ForsetiOpPieceSizeCached, Cfg->BufferPoolBufferSizeBytes);
     ForsetiOpPieceSizeCached = AlignDown<i64>(ForsetiOpPieceSizeCached, Format.SectorSize);
@@ -3566,7 +3552,7 @@ void TPDisk::Update() {
     // Processing
     bool isNonLogWorkloadPresent = !JointChunkWrites.empty() || !FastOperationsQueue.empty() ||
             !JointChunkReads.empty() || !JointLogReads.empty() || !JointChunkTrims.empty() || !JointChunkForgets.empty();
-    bool isLogWorkloadPresent = !JointLogWrites.empty();
+    bool isLogWorkloadPresent = !JointLogWrites.empty() || !PostponedLogWrites.empty();
     bool isNothingToDo = true;
     if (isLogWorkloadPresent || isNonLogWorkloadPresent) {
         isNothingToDo = false;
@@ -3620,7 +3606,7 @@ void TPDisk::Update() {
 
     ClearQuarantineChunks();
 
-    if (tact == ETact::TactLc) {
+    if (tact == ETact::TactLc || UseNoopSchedulerCached) {
         ProcessLogWriteQueueAndCommits();
     }
     ProcessFastOperationsQueue();
