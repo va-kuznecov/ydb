@@ -12,6 +12,7 @@
 #include <ydb/library/schlab/schine/job_kind.h>
 
 #include <util/system/unaligned_mem.h>
+#include <util/system/yield.h>
 
 constexpr size_t MAX_REQS_PER_CYCLE = 200; // 200 requests take ~0.2ms in EnqueueAll function
 
@@ -3606,7 +3607,10 @@ void TPDisk::Update() {
 
     ClearQuarantineChunks();
 
-    if (tact == ETact::TactLc || UseNoopSchedulerCached) {
+    if (UseNoopSchedulerCached) {
+        ProcessPostponedLogWritesQueue();
+    }
+    if (tact == ETact::TactLc) {
         ProcessLogWriteQueueAndCommits();
     }
     ProcessFastOperationsQueue();
@@ -3655,7 +3659,9 @@ void TPDisk::Update() {
     // Wait for something to do
     if (isNothingToDo && InputQueue.GetWaitingSize() == 0 && ForsetiScheduler.IsEmpty()) {
         // use deadline to be able to wakeup in situation of pdisk destruction
-        InputQueue.ProducedWait(TDuration::MilliSeconds(10));
+        InputQueue.ProducedWait(TDuration::MilliSeconds(1));
+    } else {
+        SchedYield();
     }
 
     auto entireUpdateMs = Mon.UpdateDurationTracker.UpdateEnded();

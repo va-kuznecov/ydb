@@ -354,6 +354,7 @@ public:
     void KillOwner(TOwner owner, TOwnerRound killOwnerRound, TCompletionEventSender *completionAction);
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Update process
+    void ProcessPostponedLogWritesQueue();
     void ProcessLogWriteQueueAndCommits();
     void ProcessChunkForgetQueue();
     void ProcessChunkWriteQueue();

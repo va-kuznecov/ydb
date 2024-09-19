@@ -707,28 +707,31 @@ void TPDisk::WriteSysLogRestorePoint(TCompletionAction *action, TReqId reqId, NW
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Common log writing
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void TPDisk::ProcessLogWriteQueueAndCommits() {
-    JointLogWritesBytesSize = 0;
-    while (PostponedLogWrites.size() && JointLogWrites.size() < 50 && JointLogWritesBytesSize < (size_t)ForsetiOpPieceSizeCached) {
-        auto *log = static_cast<TLogWrite*>(PostponedLogWrites.front());
-        PostponedLogWrites.pop();
+void TPDisk::ProcessPostponedLogWritesQueue() {
+    while (PostponedLogWrites.size()) {
+        JointLogWritesBytesSize = 0;
+        while (PostponedLogWrites.size() && JointLogWrites.size() < 50 && JointLogWritesBytesSize < (size_t)ForsetiOpPieceSizeCached) {
+            auto *log = static_cast<TLogWrite*>(PostponedLogWrites.front());
+            PostponedLogWrites.pop();
 
-        JointLogWrites.push_back(log);
-        JointLogWritesBytesSize += log->Data.Size();
-        if (log->Signature.HasCommitRecord()) {
-            JointCommits.push_back(log);
+            JointLogWrites.push_back(log);
+            JointLogWritesBytesSize += log->Data.Size();
+            if (log->Signature.HasCommitRecord()) {
+                JointCommits.push_back(log);
+            }
         }
+        LWTRACK(PDiskProcessPostponedLogWriteQueue, UpdateCycleOrbit, PCtx->PDiskId, PostponedLogWrites.size(), JointLogWrites.size(), JointCommits.size());
+        ProcessLogWriteQueueAndCommits();
     }
+}
 
+void TPDisk::ProcessLogWriteQueueAndCommits() {
     if (JointLogWrites.empty()) {
         LWTRACK(PDiskProcessLogWriteQueue, UpdateCycleOrbit, PCtx->PDiskId, JointLogWrites.size(), JointCommits.size());
         return;
     }
 
-    NHPTimer::STime now = HPNow();
     for (TLogWrite *logCommit : JointCommits) {
-        Mon.LogQueueTime.Increment(logCommit->LifeDurationMs(now));
-
         TStringStream errorReason;
         NKikimrProto::EReplyStatus status = ValidateRequest(logCommit, errorReason);
         if (status == NKikimrProto::OK) {
@@ -738,10 +741,12 @@ void TPDisk::ProcessLogWriteQueueAndCommits() {
             PrepareLogError(logCommit, errorReason, status);
         }
     }
+    NHPTimer::STime now = HPNow();
     NWilson::TTraceId traceId;
     size_t logOperationSizeBytes = 0;
     TVector<ui32> logChunksToCommit;
     for (TLogWrite *logWrite : JointLogWrites) {
+        Mon.LogQueueTime.Increment(logWrite->LifeDurationMs(now));
         Y_DEBUG_ABORT_UNLESS(logWrite);
         logWrite->SpanStack.PopOk();
         logOperationSizeBytes += logWrite->Data.size();
