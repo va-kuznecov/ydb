@@ -106,7 +106,8 @@ public:
     TControlWrapper ForsetiMaxLogBatchNs;
     TControlWrapper ForsetiOpPieceSizeSsd;
     TControlWrapper ForsetiOpPieceSizeRot;
-    TControlWrapper UseNoopScheduler;
+    TControlWrapper UseNoopSchedulerNVMe;
+    TControlWrapper UseNoopSchedulerRot;
     bool UseNoopSchedulerCached = false;
 
     // SectorMap Controls
@@ -412,12 +413,13 @@ public:
     bool PreprocessRequestImpl(T *req); // const;
     NKikimrProto::EReplyStatus CheckOwnerAndRound(TRequestBase* req, TStringStream& err);
     bool PreprocessRequest(TRequestBase *request);
-    void PushRequestToForseti(TRequestBase *request);
+    void PushRequestToScheduler(TRequestBase *request);
     void AddJobToForseti(NSchLab::TCbs *cbs, TRequestBase *request, NSchLab::EJobKind jobKind);
     void RouteRequest(TRequestBase *request);
     void ProcessPausedQueue();
     void ProcessPendingActivities();
     void EnqueueAll();
+    void GetJobsFromForsetti();
     void Update() override;
     void Wakeup() override;
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
