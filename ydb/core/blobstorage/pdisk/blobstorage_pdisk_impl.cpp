@@ -3452,38 +3452,7 @@ void TPDisk::EnqueueAll() {
     LWTRACK(PDiskEnqueueAllDetails, UpdateCycleOrbit, PCtx->PDiskId, initialQueueSize, processedReqs, pushedToForsetiReqs, spentTimeMs);
 }
 
-<<<<<<< HEAD
-void TPDisk::Update() {
-    Mon.UpdateDurationTracker.UpdateStarted();
-    LWTRACK(PDiskUpdateStarted, UpdateCycleOrbit, PCtx->PDiskId);
-
-    ForsetiMaxLogBatchNsCached = ForsetiMaxLogBatchNs;
-    //UseNoopSchedulerCached = UseNoopScheduler;
-    UseNoopSchedulerCached = true;
-    ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ? ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;
-    ForsetiOpPieceSizeCached = Min<i64>(ForsetiOpPieceSizeCached, Cfg->BufferPoolBufferSizeBytes);
-    ForsetiOpPieceSizeCached = AlignDown<i64>(ForsetiOpPieceSizeCached, Format.SectorSize);
-
-    UseNoopSchedulerCached = UseNoopScheduler;
-    // Make input queue empty
-    {
-        TGuard<TMutex> guard(StateMutex);
-
-        // Switch the scheduler when possible
-        ForsetiScheduler.SetIsBinLogEnabled(EnableForsetiBinLog);
-
-        // Make input queue empty
-        EnqueueAll();
-    }
-
-    // Make token injection to correct drive model underestimations and avoid disk underutilization
-
-    Mon.UpdateDurationTracker.SchedulingStart();
-
-    // Schedule using Forseti Scheduler
-=======
 void TPDisk::GetJobsFromForsetti() {
->>>>>>> rework icb controls
     // Prepare
     UpdateMinLogCostNs();
     ui64 milliBatchSize = ForsetiMilliBatchSize;
@@ -3572,16 +3541,19 @@ void TPDisk::Update() {
     // ui32 userSectorSize = 0;
 
     ForsetiMaxLogBatchNsCached = ForsetiMaxLogBatchNs;
-    UseNoopSchedulerCached = PDiskCategory.IsSolidState() ? UseNoopSchedulerSSD : UseNoopSchedulerHDD;
     ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ? ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;
-    // Make input queue empty
+    ForsetiOpPieceSizeCached = Min<i64>(ForsetiOpPieceSizeCached, Cfg->BufferPoolBufferSizeBytes);
+    ForsetiOpPieceSizeCached = AlignDown<i64>(ForsetiOpPieceSizeCached, Format.SectorSize);
+
+    UseNoopSchedulerCached = PDiskCategory.IsSolidState() ? UseNoopSchedulerSSD : UseNoopSchedulerHDD;
     {
         TGuard<TMutex> guard(StateMutex);
-        EnqueueAll();
-        /*userSectorSize = */Format.SectorPayloadSize();
 
         // Switch the scheduler when possible
         ForsetiScheduler.SetIsBinLogEnabled(EnableForsetiBinLog);
+
+        // Make input queue empty
+        EnqueueAll();
     }
 
     // Make token injection to correct drive model underestimations and avoid disk underutilization
