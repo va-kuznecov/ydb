@@ -78,8 +78,7 @@ public:
     TVector<TRequestBase*> JointLogReads;
     std::queue<TIntrusivePtr<TRequestBase>> JointChunkReads;
     std::queue<TRequestBase*> JointChunkWrites;
-    std::queue<TRequestBase*> PostponedLogWrites;
-    TVector<TLogWrite*> JointLogWrites;
+    std::queue<TRequestBase*> JointLogWrites; // ?? std::queue<TLogWrite*> JointLogWrites;
     size_t JointLogWritesBytesSize = 0;
     TVector<TLogWrite*> JointCommits;
     TVector<TChunkTrim*> JointChunkTrims;
@@ -106,8 +105,8 @@ public:
     TControlWrapper ForsetiMaxLogBatchNs;
     TControlWrapper ForsetiOpPieceSizeSsd;
     TControlWrapper ForsetiOpPieceSizeRot;
-    TControlWrapper UseNoopSchedulerNVMe;
-    TControlWrapper UseNoopSchedulerRot;
+    TControlWrapper UseNoopSchedulerSSD;
+    TControlWrapper UseNoopSchedulerHDD;
     bool UseNoopSchedulerCached = false;
 
     // SectorMap Controls
@@ -355,8 +354,8 @@ public:
     void KillOwner(TOwner owner, TOwnerRound killOwnerRound, TCompletionEventSender *completionAction);
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Update process
-    void ProcessPostponedLogWritesQueue();
-    void ProcessLogWriteQueueAndCommits();
+    void ProcessLogWriteQueue();
+    void ProcessLogWriteBatch(TVector<TLogWrite*> logWrites, TVector<TLogWrite*> commits);
     void ProcessChunkForgetQueue();
     void ProcessChunkWriteQueue();
     void ProcessChunkReadQueue();

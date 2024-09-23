@@ -64,8 +64,8 @@ TPDisk::TPDisk(std::shared_ptr<TPDiskCtx> pCtx, const TIntrusivePtr<TPDiskConfig
     ForsetiOpPieceSizeSsd = TControlWrapper(64 * 1024, 1, Cfg->BufferPoolBufferSizeBytes);
     ForsetiOpPieceSizeRot = TControlWrapper(512 * 1024, 1, Cfg->BufferPoolBufferSizeBytes);
     ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ?  ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;
-    UseNoopSchedulerNVMe = TControlWrapper(0, 0, 1);
-    UseNoopSchedulerRot = TControlWrapper(0, 0, 1);
+    UseNoopSchedulerSSD = TControlWrapper(0, 0, 1);
+    UseNoopSchedulerHDD = TControlWrapper(0, 0, 1);
 
     if (Cfg->SectorMap) {
         auto diskModeParams = Cfg->SectorMap->GetDiskModeParams();
@@ -97,7 +97,6 @@ TPDisk::TPDisk(std::shared_ptr<TPDiskCtx> pCtx, const TIntrusivePtr<TPDiskConfig
     FastOperationsQueue.reserve(16 << 10);
 
     JointLogReads.reserve(16 << 10);
-    JointLogWrites.reserve(16 << 10);
     JointCommits.reserve(16 << 10);
     JointChunkForgets.reserve(16 << 10);
 
@@ -347,14 +346,10 @@ void TPDisk::Stop() {
                 Y_FAIL_S("Unexpected request type# " << ui64(req->GetType()) << " in JointChunkWrites");
         }
     }
-    for (TLogWrite* req : JointLogWrites) {
-        delete req;
+    while (JointLogWrites.size()) {
+        delete JointLogWrites.front();
+        JointLogWrites.pop();
     }
-    while (PostponedLogWrites.size()) {
-        delete PostponedLogWrites.front();
-        PostponedLogWrites.pop();
-    }
-    JointLogWrites.clear();
     JointCommits.clear();
     JointChunkForgets.clear();
     for (const auto& req : FastOperationsQueue) {
@@ -2611,8 +2606,8 @@ bool TPDisk::Initialize() {
             REGISTER_LOCAL_CONTROL(ForsetiMaxLogBatchNs);
             REGISTER_LOCAL_CONTROL(ForsetiOpPieceSizeSsd);
             REGISTER_LOCAL_CONTROL(ForsetiOpPieceSizeRot);
-            REGISTER_LOCAL_CONTROL(UseNoopSchedulerNVMe);
-            REGISTER_LOCAL_CONTROL(UseNoopSchedulerRot);
+            REGISTER_LOCAL_CONTROL(UseNoopSchedulerSSD);
+            REGISTER_LOCAL_CONTROL(UseNoopSchedulerHDD);
 
             if (Cfg->SectorMap) {
                 auto diskModeParams = Cfg->SectorMap->GetDiskModeParams();
@@ -3306,7 +3301,7 @@ void TPDisk::RouteRequest(TRequestBase *request) {
                         .Event("move_to_batcher", {})
                         .Attribute("HasCommitRecord", log->Signature.HasCommitRecord());
                 }
-                PostponedLogWrites.push(log);
+                JointLogWrites.push(log);
                 log = batch;
             }
             break;
@@ -3577,7 +3572,7 @@ void TPDisk::Update() {
     // ui32 userSectorSize = 0;
 
     ForsetiMaxLogBatchNsCached = ForsetiMaxLogBatchNs;
-    UseNoopSchedulerCached = PDiskCategory.IsSolidState() ? UseNoopSchedulerNVMe : UseNoopSchedulerRot;
+    UseNoopSchedulerCached = PDiskCategory.IsSolidState() ? UseNoopSchedulerSSD : UseNoopSchedulerHDD;
     ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ? ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;
     // Make input queue empty
     {
@@ -3594,14 +3589,14 @@ void TPDisk::Update() {
     Mon.UpdateDurationTracker.SchedulingStart();
 
     // Schedule using Forseti Scheduler
-    if (!UseNoopSchedulerCached) {
+    if (!UseNoopSchedulerCached || !ForsetiScheduler.IsEmpty()) {
         GetJobsFromForsetti();
     }
 
     // Processing
     bool isNonLogWorkloadPresent = !JointChunkWrites.empty() || !FastOperationsQueue.empty() ||
             !JointChunkReads.empty() || !JointLogReads.empty() || !JointChunkTrims.empty() || !JointChunkForgets.empty();
-    bool isLogWorkloadPresent = !JointLogWrites.empty() || !PostponedLogWrites.empty();
+    bool isLogWorkloadPresent = !JointLogWrites.empty();
     bool isNothingToDo = true;
     if (isLogWorkloadPresent || isNonLogWorkloadPresent) {
         isNothingToDo = false;
@@ -3655,11 +3650,8 @@ void TPDisk::Update() {
 
     ClearQuarantineChunks();
 
-    // non-empty only for noop scheduler
-    ProcessPostponedLogWritesQueue();
-
-    if (tact == ETact::TactLc) {
-        ProcessLogWriteQueueAndCommits();
+    if (UseNoopSchedulerCached || tact == ETact::TactLc) {
+        ProcessLogWriteQueue();
     }
     ProcessFastOperationsQueue();
     ProcessChunkReadQueue();
@@ -3667,7 +3659,7 @@ void TPDisk::Update() {
     ProcessLogReadQueue();
     ProcessChunkTrimQueue();
     if (tact != ETact::TactLc) {
-        ProcessLogWriteQueueAndCommits();
+        ProcessLogWriteQueue();
     }
     ProcessChunkForgetQueue();
     LastTact = tact;

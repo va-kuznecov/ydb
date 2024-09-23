@@ -270,7 +270,8 @@ struct TEventTypeField {
       TYPES(ui64, size_t, size_t, size_t, double), \
       NAMES("pdisk", "initialQueueSize", "processedReqs", "pushedToForsetiReqs", "spentTimeMs")) \
     PROBE(PDiskUpdateStarted, GROUPS("PDisk"), TYPES(ui64), NAMES("pdisk")) \
-    PROBE(PDiskProcessLogWriteQueue, GROUPS("PDisk"), TYPES(ui64, size_t, size_t), NAMES("pdisk", "logQueueSize", "commitQueueSize")) \
+    PROBE(PDiskProcessLogWriteQueue, GROUPS("PDisk"), TYPES(ui64, size_t, size_t, size_t), NAMES("pdisk", "remainingLogWritesSize", "logWritesSize", "commitsSize")) \
+    PROBE(PDiskProcessLogWriteBatch, GROUPS("PDisk"), TYPES(ui64, size_t, size_t), NAMES("pdisk", "logQueueSize", "commitQueueSize")) \
     PROBE(PDiskProcessChunkReadQueue, GROUPS("PDisk"), TYPES(ui64, size_t, size_t), NAMES("pdisk", "initialQueueSize", "processed")) \
     PROBE(PDiskProcessChunkWriteQueue, GROUPS("PDisk"), TYPES(ui64, size_t, size_t), NAMES("pdisk", "initialQueueSize", "processed")) \
     PROBE(PDiskStartWaiting, GROUPS("PDisk"), TYPES(ui64), NAMES("pdisk")) \
