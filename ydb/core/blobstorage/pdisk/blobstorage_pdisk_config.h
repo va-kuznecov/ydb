@@ -31,6 +31,11 @@ struct TPDiskSchedulerConfig {
     ui64 LoadWeight = LoadWeightDefault;
     ui64 LowReadWeight = LowWeightDefault;
 
+    size_t MaxChunkReadsPerCycle = 16;
+    double MaxChunkReadsDurationPerCycleMs = 0.25;
+    size_t MaxChunkWritesPerCycle = 8;
+    double MaxChunkWritesDurationPerCycleMs = 1;
+
     TString ToString(bool isMultiline) const {
         const char *x = isMultiline ? "\n" : "";
         TStringStream str;
@@ -45,6 +50,10 @@ struct TPDiskSchedulerConfig {
         str << " OtherReadWeight# " << OtherReadWeight << x;
         str << " LoadWeight# " << LoadWeight << x;
         str << " LowReadWeight# " << LowReadWeight << x;
+        str << " MaxChunkReadsPerCycle# " << MaxChunkReadsPerCycle << x;
+        str << " MaxChunkReadsDurationPerCycleMs# " << MaxChunkReadsDurationPerCycleMs << x;
+        str << " MaxChunkWritesPerCycle# " << MaxChunkWritesPerCycle << x;
+        str << " MaxChunkWritesDurationPerCycleMs# " << MaxChunkWritesDurationPerCycleMs << x;
         str << "}" << x;
         return str.Str();
     }
@@ -213,10 +222,13 @@ struct TPDiskConfig : public TThrRefBase {
         DeviceInFlight = choose(128, 4, hddInFlight);
         CostLimitNs = choose(500'000ull, 20'000'000ull, 50'000'000ull);
 
+<<<<<<< HEAD
         BufferPoolBufferSizeBytes = choose(128 << 10, 256 << 10, 512 << 10);
         BufferPoolBufferCount = choose(1024, 512, 256);
         MaxQueuedCompletionActions = BufferPoolBufferCount / 2;
 
+=======
+>>>>>>> move params to config, enhance lwtracks
         UseSpdkNvmeDriver = Path.StartsWith("PCIe:");
         Y_ABORT_UNLESS(!UseSpdkNvmeDriver || deviceType == NPDisk::DEVICE_TYPE_NVME,
                 "SPDK NVMe driver can be used only with NVMe devices!");
@@ -313,6 +325,7 @@ struct TPDiskConfig : public TThrRefBase {
         str << " SpaceColorBorder# " << SpaceColorBorder << x;
         str << " CompletionThreadsCount# " << CompletionThreadsCount << x;
         str << " MaxMetadataMegabytes# " << MaxMetadataMegabytes << x;
+        str << " SpaceColorBorder# " << SpaceColorBorder << x;
         str << "}";
         return str.Str();
     }

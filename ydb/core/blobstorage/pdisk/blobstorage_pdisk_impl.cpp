@@ -2219,10 +2219,12 @@ void TPDisk::Slay(TSlay &evSlay) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void TPDisk::ProcessChunkWriteQueue() {
-    auto start = TMonotonic::Now();
+    auto start = HPNow();
 
     size_t initialSize = JointChunkWrites.size();
     size_t processed = 0;
+    size_t processedBytes = 0;
+    double processedCostMs = 0;
     while (JointChunkWrites.size()) {
         TRequestBase *req = JointChunkWrites.front();
         JointChunkWrites.pop();
@@ -2230,9 +2232,14 @@ void TPDisk::ProcessChunkWriteQueue() {
         req->SpanStack.PopOk();
         req->SpanStack.Push(TWilson::PDiskDetailed, "PDisk.InBlockDevice", NWilson::EFlags::AUTO_END);
 
+
         Y_VERIFY_S(req->GetType() == ERequestType::RequestChunkWritePiece, "Unexpected request type# " << ui64(req->GetType())
             << " TypeName# " << TypeName(*req) << " in JointChunkWrites");
         TChunkWritePiece *piece = static_cast<TChunkWritePiece*>(req);
+        processed++;
+        processedBytes += piece->PieceSize;
+        processedCostMs += piece->GetCostMs();
+
         P_LOG(PRI_DEBUG, BPD01, "ChunkWritePiece",
             (ChunkIdx, piece->ChunkWrite->ChunkIdx),
             (Offset, piece->PieceShift),
@@ -2240,21 +2247,21 @@ void TPDisk::ProcessChunkWriteQueue() {
         );
         bool lastPart = ChunkWritePiece(piece->ChunkWrite.Get(), piece->PieceShift, piece->PieceSize);
         if (lastPart) {
-            Mon.IncrementQueueTime(piece->ChunkWrite->PriorityClass, piece->ChunkWrite->LifeDurationMs(now));
+            Mon.IncrementQueueTime(piece->ChunkWrite->PriorityClass, piece->ChunkWrite->LifeDurationMs(HPNow()));
         }
         delete piece;
+        // prevent the thread from being stuck for long
+        if (UseNoopSchedulerCached && processed >= Cfg->SchedulerCfg.MaxChunkWritesPerCycle
+            && HPMilliSecondsFloat(HPNow() - start) > Cfg->SchedulerCfg.MaxChunkWritesDurationPerCycleMs) {
 
-        ++processed;
-        // prevent this thread from being stuck for long
-        if (processed > 8 && (TMonotonic::Now() - start).MicroSeconds() > 500) {
             break;
         }
     }
-    LWTRACK(PDiskProcessChunkWriteQueue, UpdateCycleOrbit, PCtx->PDiskId, initialSize, processed);
+    LWTRACK(PDiskProcessChunkWriteQueue, UpdateCycleOrbit, PCtx->PDiskId, initialSize, processed, processedBytes, processedCostMs);
 }
 
 void TPDisk::ProcessChunkReadQueue() {
-    auto start = TMonotonic::Now();
+    auto start = HPNow();
     // Size (bytes) of elementary sectors block, it is useless to read/write less than that blockSize
     ui64 bufferSize;
     with_lock(StateMutex) {
@@ -2263,6 +2270,8 @@ void TPDisk::ProcessChunkReadQueue() {
 
     size_t initialSize = JointChunkReads.size();
     size_t processed = 0;
+    size_t processedBytes = 0;
+    double processedCostMs = 0;
     while (JointChunkReads.size()) {
         auto req = JointChunkReads.front();
         JointChunkReads.pop();
@@ -2272,6 +2281,9 @@ void TPDisk::ProcessChunkReadQueue() {
 
         Y_VERIFY_S(req->GetType() == ERequestType::RequestChunkReadPiece, "Unexpected request type# " << ui64(req->GetType()) << " in JointChunkReads");
         TChunkReadPiece *piece = static_cast<TChunkReadPiece*>(req.Get());
+        processed++;
+        processedBytes += piece->PieceSizeLimit;
+        processedCostMs += piece->GetCostMs();
         Y_ABORT_UNLESS(!piece->SelfPointer);
         TIntrusivePtr<TChunkRead> &read = piece->ChunkRead;
         TReqId reqId = read->ReqId;
@@ -2302,11 +2314,13 @@ void TPDisk::ProcessChunkReadQueue() {
         }
 
         ++processed;
-        if (processed > 16 && (TMonotonic::Now() - start).MicroSeconds() > 500) {
+        // prevent the thread from being stuck for long
+        if (UseNoopSchedulerCached && processed >= Cfg->SchedulerCfg.MaxChunkReadsPerCycle
+            && HPMilliSecondsFloat(HPNow() - start) > Cfg->SchedulerCfg.MaxChunkReadsDurationPerCycleMs) {
             break;
         }
     }
-    LWTRACK(PDiskProcessChunkReadQueue, UpdateCycleOrbit, PCtx->PDiskId, initialSize, processed);
+    LWTRACK(PDiskProcessChunkReadQueue, UpdateCycleOrbit, PCtx->PDiskId, initialSize, processed, processedBytes, processedCostMs);
 }
 
 void TPDisk::TrimAllUntrimmedChunks() {
@@ -2594,11 +2608,13 @@ void TPDisk::OnDriveStartup() {
 bool TPDisk::Initialize() {
 
 #define REGISTER_LOCAL_CONTROL(control) \
-    PCtx->ActorSystem->AppData<TAppData>()->Icb->RegisterLocalControl(control, \
+    icb->RegisterLocalControl(control, \
             TStringBuilder() << "PDisk_" << PCtx->PDiskId << "_" << #control)
 
     if (!IsStarted) {
         if (PCtx->ActorSystem && PCtx->ActorSystem->AppData<TAppData>() && PCtx->ActorSystem->AppData<TAppData>()->Icb) {
+            auto& icb = PCtx->ActorSystem->AppData<TAppData>()->Icb;
+
             REGISTER_LOCAL_CONTROL(SlowdownAddLatencyNs);
             REGISTER_LOCAL_CONTROL(EnableForsetiBinLog);
             REGISTER_LOCAL_CONTROL(ForsetiMinLogCostNsControl);
@@ -2606,8 +2622,8 @@ bool TPDisk::Initialize() {
             REGISTER_LOCAL_CONTROL(ForsetiMaxLogBatchNs);
             REGISTER_LOCAL_CONTROL(ForsetiOpPieceSizeSsd);
             REGISTER_LOCAL_CONTROL(ForsetiOpPieceSizeRot);
-            REGISTER_LOCAL_CONTROL(UseNoopSchedulerSSD);
-            REGISTER_LOCAL_CONTROL(UseNoopSchedulerHDD);
+            icb->RegisterSharedControl(UseNoopSchedulerHDD, "PDiskControls.UseNoopSchedulerHDD");
+            icb->RegisterSharedControl(UseNoopSchedulerSSD, "PDiskControls.UseNoopSchedulerSSD");
 
             if (Cfg->SectorMap) {
                 auto diskModeParams = Cfg->SectorMap->GetDiskModeParams();
@@ -3537,8 +3553,6 @@ void TPDisk::GetJobsFromForsetti() {
 void TPDisk::Update() {
     Mon.UpdateDurationTracker.UpdateStarted();
     LWTRACK(PDiskUpdateStarted, UpdateCycleOrbit, PCtx->PDiskId);
-
-    // ui32 userSectorSize = 0;
 
     ForsetiMaxLogBatchNsCached = ForsetiMaxLogBatchNs;
     ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ? ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;

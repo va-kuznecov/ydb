@@ -95,6 +95,10 @@ public:
         return HPMilliSecondsFloat(now - CreationTime);
     }
 
+    double GetCostMs() const {
+        return Cost / 1.0e6; // since cost is in nanoseconds
+    }
+
     ui64 GetCost() const {
         return Cost;
     }
