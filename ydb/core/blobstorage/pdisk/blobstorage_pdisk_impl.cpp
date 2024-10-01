@@ -3554,14 +3554,15 @@ void TPDisk::Update() {
     Mon.UpdateDurationTracker.UpdateStarted();
     LWTRACK(PDiskUpdateStarted, UpdateCycleOrbit, PCtx->PDiskId);
 
-    ForsetiMaxLogBatchNsCached = ForsetiMaxLogBatchNs;
-    ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ? ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;
-    ForsetiOpPieceSizeCached = Min<i64>(ForsetiOpPieceSizeCached, Cfg->BufferPoolBufferSizeBytes);
-    ForsetiOpPieceSizeCached = AlignDown<i64>(ForsetiOpPieceSizeCached, Format.SectorSize);
-
-    UseNoopSchedulerCached = PDiskCategory.IsSolidState() ? UseNoopSchedulerSSD : UseNoopSchedulerHDD;
     {
         TGuard<TMutex> guard(StateMutex);
+
+        ForsetiMaxLogBatchNsCached = ForsetiMaxLogBatchNs;
+        ForsetiOpPieceSizeCached = PDiskCategory.IsSolidState() ? ForsetiOpPieceSizeSsd : ForsetiOpPieceSizeRot;
+        ForsetiOpPieceSizeCached = Min<i64>(ForsetiOpPieceSizeCached, Cfg->BufferPoolBufferSizeBytes);
+        ForsetiOpPieceSizeCached = AlignDown<i64>(ForsetiOpPieceSizeCached, Format.SectorSize);
+
+        UseNoopSchedulerCached = PDiskCategory.IsSolidState() ? UseNoopSchedulerSSD : UseNoopSchedulerHDD;
 
         // Switch the scheduler when possible
         ForsetiScheduler.SetIsBinLogEnabled(EnableForsetiBinLog);
