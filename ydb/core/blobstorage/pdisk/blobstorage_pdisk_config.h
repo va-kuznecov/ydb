@@ -222,13 +222,10 @@ struct TPDiskConfig : public TThrRefBase {
         DeviceInFlight = choose(128, 4, hddInFlight);
         CostLimitNs = choose(500'000ull, 20'000'000ull, 50'000'000ull);
 
-<<<<<<< HEAD
         BufferPoolBufferSizeBytes = choose(128 << 10, 256 << 10, 512 << 10);
         BufferPoolBufferCount = choose(1024, 512, 256);
         MaxQueuedCompletionActions = BufferPoolBufferCount / 2;
 
-=======
->>>>>>> move params to config, enhance lwtracks
         UseSpdkNvmeDriver = Path.StartsWith("PCIe:");
         Y_ABORT_UNLESS(!UseSpdkNvmeDriver || deviceType == NPDisk::DEVICE_TYPE_NVME,
                 "SPDK NVMe driver can be used only with NVMe devices!");
@@ -322,10 +319,9 @@ struct TPDiskConfig : public TThrRefBase {
         str << " OrangeLogChunksMultiplier# " << OrangeLogChunksMultiplier << x;
         str << " WarningLogChunksMultiplier# " << WarningLogChunksMultiplier << x;
         str << " YellowLogChunksMultiplier# " << YellowLogChunksMultiplier << x;
-        str << " SpaceColorBorder# " << SpaceColorBorder << x;
-        str << " CompletionThreadsCount# " << CompletionThreadsCount << x;
         str << " MaxMetadataMegabytes# " << MaxMetadataMegabytes << x;
         str << " SpaceColorBorder# " << SpaceColorBorder << x;
+        str << " CompletionThreadsCount# " << CompletionThreadsCount << x;
         str << "}";
         return str.Str();
     }
