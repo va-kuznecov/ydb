@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package NMds;
+
+message PingRequest {
+    string message = 1;
+}
+
+message PingResponse {
+    string message = 1;
+    uint64 ping_count = 2;
+}
+
+message PutRequest {
+    bytes Key = 1;
+    bytes Value = 2;
+}
+
+message PutResponse {
+    string status = 1;
+}
+
+message GetRequest {
+    bytes Key = 1;
+}
+
+message GetResponse {
+    bytes Value = 1;
+}
+
+service MdsService {
+    rpc Ping(PingRequest) returns (PingResponse);
+    rpc Put(PutRequest) returns (PutResponse);
+    rpc Get(GetRequest) returns (GetResponse);
+}

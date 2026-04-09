@@ -1,0 +1,12 @@
+PROTO_LIBRARY(mds-grpc)
+PROTOC_FATAL_WARNINGS()
+
+GRPC()
+
+SRCS(
+    mds.proto
+)
+
+EXCLUDE_TAGS(GO_PROTO)
+
+END()
